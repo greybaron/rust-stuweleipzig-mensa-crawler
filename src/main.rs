@@ -1,12 +1,10 @@
 #![allow(unused_variables, dead_code, unused_mut)]
-use std::{env, process::exit, time::Instant};
+use std::{env, process::exit};
 
 use chrono::{Datelike, Duration, Weekday};
 use scraper::{Html, Selector};
 use selectors::{attr::CaseSensitivity, Element};
 use teloxide::utils::markdown;
-
-// Import week days and WeekDay
 
 struct MealGroup {
     meal_type: String,
@@ -34,6 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         panic!("invalid option")
     };
+    
     println!("{}", build_heute_msg(mode).await);
     Ok(())
 }
@@ -58,18 +57,21 @@ async fn build_heute_msg(mode: i64) -> String {
     let mut msg: String = String::new();
 
     // get requested date
-    let mut requested_date = chrono::Local::now() + Duration::days(mode.clone());
-    let mut date_was_raised = false;
+    let mut requested_date = chrono::Local::now() + Duration::days(mode);
+    let mut date_raised_by_days = 0;
 
     match requested_date.weekday() {
         // sat -> change req_date to mon
         Weekday::Sat => {
-            requested_date = requested_date + Duration::days(1);
-            date_was_raised = true;
+            requested_date = requested_date + Duration::days(2);
+            date_raised_by_days = 2;
         }
-        Weekday::Sun => {}
+        Weekday::Sun => {
+            requested_date = requested_date + Duration::days(1);
+            date_raised_by_days = 1;
+        }
         _ => {
-            // panic!("ok")
+            // Any other weekday is fine, nothing to do
         }
     }
 
@@ -82,9 +84,21 @@ async fn build_heute_msg(mode: i64) -> String {
     // retrieve meals
     let (v_meal_groups, ret_date) = get_meals(year, month, day).await;
 
-    let now = Instant::now();
-    // insert date into msg
-    msg += &format!("{}\n", markdown::italic(&escape_markdown_v2(&ret_date)));
+    // if mode=0, then "today" was requested. So if date_raised_by_days is != 0 AND mode=0, append warning
+    let future_day_info = if mode == 0 && date_raised_by_days == 1 {
+        "(Morgen)"
+    } else if mode == 0 && date_raised_by_days == 2 {
+        "(Übermorgen)"
+    } else {
+        ""
+    };
+
+    // insert date+future day info into msg
+    msg += &format!(
+        "{} {}\n",
+        markdown::italic(&escape_markdown_v2(&ret_date)),
+        future_day_info
+    );
 
     // loop over meal groups
     for meal_group in v_meal_groups {
@@ -131,14 +145,11 @@ async fn build_heute_msg(mode: i64) -> String {
     }
 
     msg += &escape_markdown_v2("\n < /heute >  < /morgen >\n < /uebermorgen >");
-    println!("msg build took {:.2?}", now.elapsed());
     msg
 }
 
 async fn get_meals(year: i32, month: u32, day: u32) -> (Vec<MealGroup>, String) {
     let mut v_meal_groups: Vec<MealGroup> = Vec::new();
-
-    let now = Instant::now();
 
     // url parameters
     let loc = 140;
@@ -155,8 +166,7 @@ async fn get_meals(year: i32, month: u32, day: u32) -> (Vec<MealGroup>, String) 
         .text()
         .await
         .unwrap();
-    println!("html req took {:.2?}", now.elapsed());
-    let now = Instant::now();
+
     let document = Html::parse_fragment(&html_text);
 
     // retrieving reported date and comparing to requested date
@@ -259,6 +269,6 @@ async fn get_meals(year: i32, month: u32, day: u32) -> (Vec<MealGroup>, String) 
             v_meal_groups.push(meal_group);
         }
     }
-    println!("parsing took {:.2?}", now.elapsed());
+
     (v_meal_groups, received_date)
 }
