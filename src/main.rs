@@ -1,10 +1,34 @@
-#![allow(unused_variables, dead_code, unused_mut)]
 use std::{env, process::exit};
 
 use chrono::{Datelike, Duration, Weekday};
 use scraper::{Html, Selector};
 use selectors::{attr::CaseSensitivity, Element};
-use teloxide::utils::markdown;
+
+mod markdown {
+    pub fn bold(s: &str) -> String {
+        format!("*{s}*")
+    }
+    pub fn italic(s: &str) -> String {
+        if s.starts_with("__") && s.ends_with("__") {
+            format!(r"_{}\r__", &s[..s.len() - 1])
+        } else {
+            format!("_{s}_")
+        }
+    }
+    pub fn underline(s: &str) -> String {
+        // In case of ambiguity between italic and underline entities
+        // ‘__’ is always greedily treated from left to right as beginning or end of
+        // underline entity, so instead of ___italic underline___ we should use
+        // ___italic underline_\r__, where \r is a character with code 13, which
+        // will be ignored.
+        if s.starts_with('_') && s.ends_with('_') {
+            format!(r"__{s}\r__")
+        } else {
+            format!("__{s}__")
+        }
+    }
+}
+
 
 struct MealGroup {
     meal_type: String,
@@ -23,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let arg: Vec<String> = env::args().collect();
 
     // mode: 0/1/2 heute/morgen/übermorgen
-    let mode: i64 = if (&arg.len().into() == 1) || (&arg[1] == "heute") {
+    let mode: i64 = if ((arg.len() as u32) == 1) || (&arg[1] == "heute") {
         0
     } else if &arg[1] == "morgen" {
         1
