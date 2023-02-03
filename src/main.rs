@@ -1,10 +1,10 @@
 #![allow(unused_variables, dead_code, unused_mut)]
-use std::process::exit;
+use std::{env, process::exit, time::Instant};
 
-use chrono::Datelike;
+use chrono::{Datelike, Duration, Weekday};
 use scraper::{Html, Selector};
 use selectors::{attr::CaseSensitivity, Element};
-use teloxide::{utils::markdown};
+use teloxide::utils::markdown;
 
 // Import week days and WeekDay
 
@@ -21,12 +21,22 @@ struct SingleMeal {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let text = build_heute_msg().await;
-    println!("{}", text);
+    // let text = build_heute_msg().await;
+    let arg: Vec<String> = env::args().collect();
+
+    // mode: 0/1/2 heute/morgen/übermorgen
+    let mode: i64 = if (&arg.len().into() == 1) || (&arg[1] == "heute") {
+        0
+    } else if &arg[1] == "morgen" {
+        1
+    } else if &arg[1] == "uebermorgen" {
+        2
+    } else {
+        panic!("invalid option")
+    };
+    println!("{}", build_heute_msg(mode).await);
     Ok(())
 }
-
-
 
 fn escape_markdown_v2(input: &str) -> String {
     let res = input
@@ -44,16 +54,35 @@ fn escape_markdown_v2(input: &str) -> String {
     res
 }
 
-async fn build_heute_msg() -> String {
+async fn build_heute_msg(mode: i64) -> String {
     let mut msg: String = String::new();
 
-    // get current date
-    let local_date = chrono::Local::now();
-    let (year, month, day) = (local_date.year(), local_date.month(), local_date.day());
+    // get requested date
+    let mut requested_date = chrono::Local::now() + Duration::days(mode.clone());
+    let mut date_was_raised = false;
+
+    match requested_date.weekday() {
+        // sat -> change req_date to mon
+        Weekday::Sat => {
+            requested_date = requested_date + Duration::days(1);
+            date_was_raised = true;
+        }
+        Weekday::Sun => {}
+        _ => {
+            // panic!("ok")
+        }
+    }
+
+    let (year, month, day) = (
+        requested_date.year(),
+        requested_date.month(),
+        requested_date.day(),
+    );
 
     // retrieve meals
     let (v_meal_groups, ret_date) = get_meals(year, month, day).await;
 
+    let now = Instant::now();
     // insert date into msg
     msg += &format!("{}\n", markdown::italic(&escape_markdown_v2(&ret_date)));
 
@@ -102,12 +131,14 @@ async fn build_heute_msg() -> String {
     }
 
     msg += &escape_markdown_v2("\n < /heute >  < /morgen >\n < /uebermorgen >");
-
+    println!("msg build took {:.2?}", now.elapsed());
     msg
 }
 
 async fn get_meals(year: i32, month: u32, day: u32) -> (Vec<MealGroup>, String) {
     let mut v_meal_groups: Vec<MealGroup> = Vec::new();
+
+    let now = Instant::now();
 
     // url parameters
     let loc = 140;
@@ -124,7 +155,8 @@ async fn get_meals(year: i32, month: u32, day: u32) -> (Vec<MealGroup>, String) 
         .text()
         .await
         .unwrap();
-
+    println!("html req took {:.2?}", now.elapsed());
+    let now = Instant::now();
     let document = Html::parse_fragment(&html_text);
 
     // retrieving reported date and comparing to requested date
@@ -227,5 +259,6 @@ async fn get_meals(year: i32, month: u32, day: u32) -> (Vec<MealGroup>, String) 
             v_meal_groups.push(meal_group);
         }
     }
+    println!("parsing took {:.2?}", now.elapsed());
     (v_meal_groups, received_date)
 }
