@@ -176,7 +176,6 @@ async fn build_heute_msg(mode: i64) -> String {
     //println!("message build took: {:.2?}\n\n", now.elapsed());
 
     // return
-    println!("{}", msg);
     escape_markdown_v2(&msg)
 }
 
