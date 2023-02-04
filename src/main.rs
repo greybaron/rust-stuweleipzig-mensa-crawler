@@ -158,7 +158,7 @@ async fn build_heute_msg(mode: i64) -> String {
             for ingredient in &sub_meal.additional_ingredients {
                 // appending ingredient to msg
                 msg += &format!(
-                    "     \\+ {}\n",
+                    "     + {}\n",
                     markdown::italic(&ingredient)
                 )
             }
