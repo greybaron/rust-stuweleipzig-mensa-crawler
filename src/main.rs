@@ -3,7 +3,7 @@ use std::{env, process::exit};
 use chrono::{Datelike, Duration, Weekday};
 use scraper::{Html, Selector};
 use selectors::{attr::CaseSensitivity, Element};
-use std::time::Instant;
+// use std::time::Instant;
 
 mod markdown {
     pub fn bold(s: &str) -> String {
@@ -57,7 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         panic!("invalid option")
     };
-    
+
     println!("{}", build_heute_msg(mode).await);
     Ok(())
 }
@@ -79,7 +79,7 @@ fn escape_markdown_v2(input: &str) -> String {
 }
 
 async fn build_heute_msg(mode: i64) -> String {
-    let now = Instant::now();
+    // let now = Instant::now();
     let mut msg: String = String::new();
 
     // get requested date
@@ -106,12 +106,12 @@ async fn build_heute_msg(mode: i64) -> String {
         requested_date.month(),
         requested_date.day(),
     );
-    println!("req setup took: {:.2?}", now.elapsed());
+    //println!("req setup took: {:.2?}", now.elapsed());
 
 
     // retrieve meals
     let (v_meal_groups, ret_date) = get_meals(year, month, day).await;
-    let now = Instant::now();
+    // let now = Instant::now();
     // if mode=0, then "today" was requested. So if date_raised_by_days is != 0 AND mode=0, append warning
     let future_day_info = if mode == 0 && date_raised_by_days == 1 {
         "(Morgen)"
@@ -124,7 +124,7 @@ async fn build_heute_msg(mode: i64) -> String {
     // insert date+future day info into msg
     msg += &format!(
         "{} {}\n",
-        markdown::italic(&escape_markdown_v2(&ret_date)),
+        markdown::italic(&ret_date),
         future_day_info
     );
 
@@ -143,7 +143,7 @@ async fn build_heute_msg(mode: i64) -> String {
         // Bold type of meal (-group)
         msg += &format!(
             "\n{}\n",
-            markdown::bold(&escape_markdown_v2(&meal_group.meal_type))
+            markdown::bold(&meal_group.meal_type)
         );
 
         // loop over meals in meal group
@@ -151,7 +151,7 @@ async fn build_heute_msg(mode: i64) -> String {
             // underlined single or multiple meal name
             msg += &format!(
                 " • {}\n",
-                markdown::underline(&escape_markdown_v2(&sub_meal.name))
+                markdown::underline(&sub_meal.name)
             );
 
             // loop over ingredients of meal
@@ -159,26 +159,29 @@ async fn build_heute_msg(mode: i64) -> String {
                 // appending ingredient to msg
                 msg += &format!(
                     "     \\+ {}\n",
-                    markdown::italic(&escape_markdown_v2(&ingredient))
+                    markdown::italic(&ingredient)
                 )
             }
             // appending price
             if !price_is_shared {
-                msg += &format!("   {}\n", escape_markdown_v2(&sub_meal.price));
+                msg += &format!("   {}\n", sub_meal.price);
             }
         }
         if price_is_shared {
-            msg += &format!("   {}\n", escape_markdown_v2(price_first_submeal));
+            msg += &format!("   {}\n", price_first_submeal);
         }
     }
 
-    msg += &escape_markdown_v2("\n < /heute >  < /morgen >\n < /uebermorgen >");
-    println!("message build took: {:.2?}\n\n", now.elapsed());
-    msg
+    msg += "\n < /heute >  < /morgen >\n < /uebermorgen >";
+    //println!("message build took: {:.2?}\n\n", now.elapsed());
+
+    // return
+    println!("{}", msg);
+    escape_markdown_v2(&msg)
 }
 
 async fn get_meals(year: i32, month: u32, day: u32) -> (Vec<MealGroup>, String) {
-    let now = Instant::now();
+    // let now = Instant::now();
     let mut v_meal_groups: Vec<MealGroup> = Vec::new();
 
     // url parameters
@@ -196,9 +199,9 @@ async fn get_meals(year: i32, month: u32, day: u32) -> (Vec<MealGroup>, String) 
         .text()
         .await
         .unwrap();
-    println!("req return took: {:.2?}", now.elapsed());
+    //println!("req return took: {:.2?}", now.elapsed());
 
-    let now = Instant::now();
+    // let now = Instant::now();
     let document = Html::parse_fragment(&html_text);
 
     // retrieving reported date and comparing to requested date
@@ -301,6 +304,6 @@ async fn get_meals(year: i32, month: u32, day: u32) -> (Vec<MealGroup>, String) 
             v_meal_groups.push(meal_group);
         }
     }
-    println!("parsing took: {:.2?}", now.elapsed());
+    //println!("parsing took: {:.2?}", now.elapsed());
     (v_meal_groups, received_date)
 }
