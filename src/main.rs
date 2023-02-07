@@ -50,16 +50,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let arg: Vec<String> = env::args().collect();
     let mode: i64;
-    // // mode: 0/1/2 heute/morgen/übermorgen
-    // let mode: i64 = if ((arg.len() as u32) == 1) || (&arg[1] == "heute") {
-    //     0
-    // } else if &arg[1] == "morgen" {
-    //     1
-    // } else if &arg[1] == "uebermorgen" {
-    //     2
-    // } else {
-    //     panic!("invalid option")
-    // };
 
     if arg.len() > 1{
         match &arg[1] as &str {
@@ -91,42 +81,68 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn prefetch() {
-    // only prefetching the current day, since there is no confidence at all
-    // in StuWe data that is more than 2 seconds in the future 👌🏻👌🏻💯
-
-    let now = chrono::Local::now();
-    if now.weekday() == Weekday::Sat || now.weekday() == Weekday::Sun {
-        exit(0);
+    let mut days: Vec<DateTime<Local>> = Vec::new();
+    // ugly hardcoded crap. Unfortunately I think this is the most readable.
+    // push today/tomorrow/tomorrowier to prefetch days, while skipping Sat/Sun
+    match chrono::Local::now().weekday() {
+        Weekday::Thu => {
+            days.push(chrono::Local::now());
+            days.push(chrono::Local::now() + Duration::days(1));
+        },
+        Weekday::Fri => {
+            days.push(chrono::Local::now());
+            days.push(chrono::Local::now() + Duration::days(3));
+        },
+        Weekday::Sat => {
+            days.push(chrono::Local::now() + Duration::days(2));
+        },
+        Weekday::Sun => {
+            days.push(chrono::Local::now() + Duration::days(1));
+            days.push(chrono::Local::now() + Duration::days(2));
+        },
+        _ => {
+            days.push(chrono::Local::now());
+            days.push(chrono::Local::now() + Duration::days(1));
+            days.push(chrono::Local::now() + Duration::days(2));
+        }
     }
+
+    // let now = chrono::Local::now();
+    // if now.weekday() == Weekday::Sat || now.weekday() == Weekday::Sun {
+    //     exit(0);
+    // }
     
     let loc = 140;
-    let req_date_formatted = build_req_date_string(now);
-
-    let url_base: String = "https://www.studentenwerk-leipzig.de/mensen-cafeterien/speiseplan?".to_owned();
-    let url_args = format!("location={}&date={}", loc, req_date_formatted);
     
-    // getting data from server
-    let html_text = reqwest::get(url_base + &url_args)
-    .await
-    .expect("URL request failed")
-    .text()
-    .await
-    .unwrap();
+    for day in days {
+        let req_date_formatted = build_req_date_string(day);
 
-    match File::open(&url_args) {
-        // file exists, check if contents match
-        Ok(mut file) => {
-            let mut contents = String::new();
-            file.read_to_string(&mut contents).expect("failed to read file contents");
-
-            if contents != html_text {
+        let url_base: String = "https://www.studentenwerk-leipzig.de/mensen-cafeterien/speiseplan?".to_owned();
+        let url_args = format!("location={}&date={}", loc, req_date_formatted);
+        
+        // getting data from server
+        let html_text = reqwest::get(url_base + &url_args)
+        .await
+        .expect("URL request failed")
+        .text()
+        .await
+        .unwrap();
+    
+        match File::open(&url_args) {
+            // file exists, check if contents match
+            Ok(mut file) => {
+                let mut contents = String::new();
+                file.read_to_string(&mut contents).expect("failed to read file contents");
+    
+                if contents != html_text {
+                    save_to_file(&url_args, &html_text);
+                }
+            },
+            // file doesnt exist, create it
+            Err(_) => {
                 save_to_file(&url_args, &html_text);
-            }
-        },
-        // file doesnt exist, create it
-        Err(_) => {
-            save_to_file(&url_args, &html_text);
-        },
+            },
+        }
     }
 }
 
