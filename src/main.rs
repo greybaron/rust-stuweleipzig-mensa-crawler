@@ -1,10 +1,10 @@
-use std::{env, process::exit};
+use std::{env, process::exit, fs::File, io::{Write, Read}};
 
-use chrono::{Datelike, Duration, Weekday};
+use chrono::{Datelike, Duration, Weekday, DateTime, Local};
 use scraper::{Html, Selector};
 use selectors::{attr::CaseSensitivity, Element};
 
-#[cfg(feature = "speed")]
+#[cfg(feature = "benchmark")]
 use std::time::Instant;
 
 mod markdown {
@@ -46,21 +46,93 @@ struct SingleMeal {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let arg: Vec<String> = env::args().collect();
+    let invalid_arg = "pass any of the following:\nheute\nmorgen\nuebermorgen\nprefetch";
 
-    // mode: 0/1/2 heute/morgen/übermorgen
-    let mode: i64 = if ((arg.len() as u32) == 1) || (&arg[1] == "heute") {
-        0
-    } else if &arg[1] == "morgen" {
-        1
-    } else if &arg[1] == "uebermorgen" {
-        2
+    let arg: Vec<String> = env::args().collect();
+    let mode: i64;
+    // // mode: 0/1/2 heute/morgen/übermorgen
+    // let mode: i64 = if ((arg.len() as u32) == 1) || (&arg[1] == "heute") {
+    //     0
+    // } else if &arg[1] == "morgen" {
+    //     1
+    // } else if &arg[1] == "uebermorgen" {
+    //     2
+    // } else {
+    //     panic!("invalid option")
+    // };
+
+    if arg.len() > 1{
+        match &arg[1] as &str {
+            "prefetch" => {
+                prefetch().await;
+                exit(0)
+            }
+            "heute" => {
+                mode = 0;
+            }
+            "morgen" => {
+                mode = 1;
+            }
+            "uebermorgen" => {
+                mode = 2;
+            }
+            _ => {
+                println!("invalid argument '{}'. {}", &arg[1], invalid_arg);
+                exit(1);
+            }
+        }
     } else {
-        panic!("invalid option")
-    };
+        println!("{invalid_arg}");
+        exit(2);
+    }
 
     println!("{}", build_heute_msg(mode).await);
     Ok(())
+}
+
+async fn prefetch() {
+    // only prefetching the current day, since there is no confidence at all
+    // in StuWe data that is more than 2 seconds in the future 👌🏻👌🏻💯
+
+    let now = chrono::Local::now();
+    if now.weekday() == Weekday::Sat || now.weekday() == Weekday::Sun {
+        exit(0);
+    }
+    
+    let loc = 140;
+    let req_date_formatted = build_req_date_string(now);
+
+    let url_base: String = "https://www.studentenwerk-leipzig.de/mensen-cafeterien/speiseplan?".to_owned();
+    let url_args = format!("location={}&date={}", loc, req_date_formatted);
+    
+    // getting data from server
+    let html_text = reqwest::get(url_base + &url_args)
+    .await
+    .expect("URL request failed")
+    .text()
+    .await
+    .unwrap();
+
+    match File::open(&url_args) {
+        // file exists, check if contents match
+        Ok(mut file) => {
+            let mut contents = String::new();
+            file.read_to_string(&mut contents).expect("failed to read file contents");
+
+            if contents != html_text {
+                save_to_file(&url_args, &html_text);
+            }
+        },
+        // file doesnt exist, create it
+        Err(_) => {
+            save_to_file(&url_args, &html_text);
+        },
+    }
+}
+
+fn save_to_file(url_args: &String, html_text: &String) {
+    let mut file = File::create(&url_args).unwrap();
+    file.write_all(html_text.as_bytes()).expect("unable to write");
 }
 
 fn escape_markdown_v2(input: &str) -> String {
@@ -80,7 +152,7 @@ fn escape_markdown_v2(input: &str) -> String {
 }
 
 async fn build_heute_msg(mode: i64) -> String {
-    #[cfg(feature = "speed")]
+    #[cfg(feature = "benchmark")]
     let now = Instant::now();
 
     let mut msg: String = String::new();
@@ -104,20 +176,14 @@ async fn build_heute_msg(mode: i64) -> String {
         }
     }
 
-    let (year, month, day) = (
-        requested_date.year(),
-        requested_date.month(),
-        requested_date.day(),
-    );
-
-    #[cfg(feature = "speed")]
+    #[cfg(feature = "benchmark")]
     println!("req setup took: {:.2?}", now.elapsed());
 
     // retrieve meals
-    let (v_meal_groups, ret_date) = get_meals(year, month, day).await;
+    let (v_meal_groups, ret_date) = get_meals(requested_date).await;
     
     // start message formatting
-    #[cfg(feature = "speed")]
+    #[cfg(feature = "benchmark")]
     let now = Instant::now();
 
     // if mode=0, then "today" was requested. So if date_raised_by_days is != 0 AND mode=0, append warning
@@ -182,38 +248,62 @@ async fn build_heute_msg(mode: i64) -> String {
 
     msg += "\n < /heute >  < /morgen >\n < /uebermorgen >";
     
-    #[cfg(feature = "speed")]
+    #[cfg(feature = "benchmark")]
     println!("message build took: {:.2?}\n\n", now.elapsed());
 
     // return
     escape_markdown_v2(&msg)
 }
 
-async fn get_meals(year: i32, month: u32, day: u32) -> (Vec<MealGroup>, String) {
-    #[cfg(feature = "speed")]
+
+fn build_req_date_string(requested_date: DateTime<Local>) -> String {
+    let (year, month, day) = (
+        requested_date.year(),
+        requested_date.month(),
+        requested_date.day(),
+    );
+
+    let out: String = format!("{:04}-{:02}-{:02}", year, month, day);
+    out
+}
+
+
+async fn get_meals(requested_date: DateTime<Local>) -> (Vec<MealGroup>, String) {
+    #[cfg(feature = "benchmark")]
     let now = Instant::now();
     let mut v_meal_groups: Vec<MealGroup> = Vec::new();
 
     // url parameters
     let loc = 140;
-    let req_date_formatted: String = format!("{:04}-{:02}-{:02}", year, month, day);
-    let url = format!(
-        "https://www.studentenwerk-leipzig.de/mensen-cafeterien/speiseplan?location={}&date={}",
-        loc, req_date_formatted
-    );
+    let req_date_formatted = build_req_date_string(requested_date);
+    let url_base = "https://www.studentenwerk-leipzig.de/mensen-cafeterien/speiseplan?";
+    let url_params = format!("location={}&date={}", loc, req_date_formatted);
 
-    // retrieving HTML to String
-    let html_text = reqwest::get(url)
-        .await
-        .expect("URL request failed")
-        .text()
-        .await
-        .unwrap();
+    let mut html_text: String = String::new();
+
+    match File::open(&url_params) {
+        // cached file exists, use that
+        Ok(mut file) => {
+            file.read_to_string(&mut html_text).expect("failed to read file contents");
+        },
+        // no cached file, use reqwest
+        Err(_) => {
+            // retrieving HTML to String
+            html_text = reqwest::get(url_base.to_string() + &url_params)
+            .await
+            .expect("URL request failed")
+            .text()
+            .await
+            .unwrap();
+        }
+    }
+
     
-    #[cfg(feature = "speed")]
+    
+    #[cfg(feature = "benchmark")]
     println!("req return took: {:.2?}", now.elapsed());
 
-    #[cfg(feature = "speed")]
+    #[cfg(feature = "benchmark")]
     let now = Instant::now();
     let document = Html::parse_fragment(&html_text);
 
@@ -317,7 +407,7 @@ async fn get_meals(year: i32, month: u32, day: u32) -> (Vec<MealGroup>, String) 
             v_meal_groups.push(meal_group);
         }
     }
-    #[cfg(feature = "speed")]
+    #[cfg(feature = "benchmark")]
     println!("parsing took: {:.2?}", now.elapsed());
     (v_meal_groups, received_date)
 }
