@@ -1,12 +1,18 @@
-use std::{env, process::exit, fs::File, io::{Write, Read}};
+use std::{
+    env,
+    fs::File,
+    io::{Read, Write},
+    process::exit,
+};
 
-use chrono::{Datelike, Duration, Weekday, DateTime, Local};
+use chrono::{DateTime, Datelike, Duration, Local, Weekday};
 use scraper::{Html, Selector};
 use selectors::{attr::CaseSensitivity, Element};
 
 #[cfg(feature = "benchmark")]
 use std::time::Instant;
 
+// ripped out of teloxide (to avoid slow compilation)
 mod markdown {
     pub fn bold(s: &str) -> String {
         format!("*{s}*")
@@ -32,7 +38,6 @@ mod markdown {
     }
 }
 
-
 struct MealGroup {
     meal_type: String,
     sub_meals: Vec<SingleMeal>,
@@ -51,7 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let arg: Vec<String> = env::args().collect();
     let mode: i64;
 
-    if arg.len() > 1{
+    if arg.len() > 1 {
         match &arg[1] as &str {
             "prefetch" => {
                 prefetch().await;
@@ -81,6 +86,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn prefetch() {
+    #[cfg(feature = "benchmark")]
+    let now = Instant::now();
+    
+
     let mut days: Vec<DateTime<Local>> = Vec::new();
     // ugly hardcoded crap. Unfortunately I think this is the most readable.
     // push today/tomorrow/tomorrowier to prefetch days, while skipping Sat/Sun
@@ -88,18 +97,18 @@ async fn prefetch() {
         Weekday::Thu => {
             days.push(chrono::Local::now());
             days.push(chrono::Local::now() + Duration::days(1));
-        },
+        }
         Weekday::Fri => {
             days.push(chrono::Local::now());
             days.push(chrono::Local::now() + Duration::days(3));
-        },
+        }
         Weekday::Sat => {
             days.push(chrono::Local::now() + Duration::days(2));
-        },
+        }
         Weekday::Sun => {
             days.push(chrono::Local::now() + Duration::days(1));
             days.push(chrono::Local::now() + Duration::days(2));
-        },
+        }
         _ => {
             days.push(chrono::Local::now());
             days.push(chrono::Local::now() + Duration::days(1));
@@ -107,48 +116,65 @@ async fn prefetch() {
         }
     }
 
-    // let now = chrono::Local::now();
-    // if now.weekday() == Weekday::Sat || now.weekday() == Weekday::Sun {
-    //     exit(0);
-    // }
-    
+    #[cfg(feature = "benchmark")]
+    println!("date sel took: {:.2?}\n", now.elapsed());
+
     let loc = 140;
-    
+
     for day in days {
+        #[cfg(feature = "benchmark")]
+        println!("starting req for {}", day.weekday());
+        #[cfg(feature = "benchmark")]
+        let now = Instant::now();
+
         let req_date_formatted = build_req_date_string(day);
 
-        let url_base: String = "https://www.studentenwerk-leipzig.de/mensen-cafeterien/speiseplan?".to_owned();
+        let url_base: String =
+            "https://www.studentenwerk-leipzig.de/mensen-cafeterien/speiseplan?".to_owned();
         let url_args = format!("location={}&date={}", loc, req_date_formatted);
-        
+
         // getting data from server
         let html_text = reqwest::get(url_base + &url_args)
-        .await
-        .expect("URL request failed")
-        .text()
-        .await
-        .unwrap();
-    
+            .await
+            .expect("URL request failed")
+            .text()
+            .await
+            .unwrap();
+
+        #[cfg(feature = "benchmark")]
+        println!("got {} data after {:.2?}", day.weekday(), now.elapsed());
+        #[cfg(feature = "benchmark")]
+        let now = Instant::now();
+
         match File::open(&url_args) {
             // file exists, check if contents match
             Ok(mut file) => {
                 let mut contents = String::new();
-                file.read_to_string(&mut contents).expect("failed to read file contents");
-    
+                file.read_to_string(&mut contents)
+                    .expect("failed to read file contents");
+
                 if contents != html_text {
                     save_to_file(&url_args, &html_text);
+
+                    #[cfg(feature = "benchmark")]
+                    println!("{}: replaced", day.weekday());
+
                 }
-            },
+            }
             // file doesnt exist, create it
             Err(_) => {
                 save_to_file(&url_args, &html_text);
-            },
+            }
         }
+        #[cfg(feature = "benchmark")]
+        println!("comparison took: {:.2?}", now.elapsed());
     }
 }
 
 fn save_to_file(url_args: &String, html_text: &String) {
     let mut file = File::create(&url_args).unwrap();
-    file.write_all(html_text.as_bytes()).expect("unable to write");
+    file.write_all(html_text.as_bytes())
+        .expect("unable to write");
 }
 
 fn escape_markdown_v2(input: &str) -> String {
@@ -197,7 +223,7 @@ async fn build_heute_msg(mode: i64) -> String {
 
     // retrieve meals
     let (v_meal_groups, ret_date) = get_meals(requested_date).await;
-    
+
     // start message formatting
     #[cfg(feature = "benchmark")]
     let now = Instant::now();
@@ -212,11 +238,7 @@ async fn build_heute_msg(mode: i64) -> String {
     };
 
     // insert date+future day info into msg
-    msg += &format!(
-        "{} {}\n",
-        markdown::italic(&ret_date),
-        future_day_info
-    );
+    msg += &format!("{} {}\n", markdown::italic(&ret_date), future_day_info);
 
     // loop over meal groups
     for meal_group in v_meal_groups {
@@ -231,26 +253,17 @@ async fn build_heute_msg(mode: i64) -> String {
         }
 
         // Bold type of meal (-group)
-        msg += &format!(
-            "\n{}\n",
-            markdown::bold(&meal_group.meal_type)
-        );
+        msg += &format!("\n{}\n", markdown::bold(&meal_group.meal_type));
 
         // loop over meals in meal group
         for sub_meal in &meal_group.sub_meals {
             // underlined single or multiple meal name
-            msg += &format!(
-                " • {}\n",
-                markdown::underline(&sub_meal.name)
-            );
+            msg += &format!(" • {}\n", markdown::underline(&sub_meal.name));
 
             // loop over ingredients of meal
             for ingredient in &sub_meal.additional_ingredients {
                 // appending ingredient to msg
-                msg += &format!(
-                    "     + {}\n",
-                    markdown::italic(&ingredient)
-                )
+                msg += &format!("     + {}\n", markdown::italic(&ingredient))
             }
             // appending price
             if !price_is_shared {
@@ -263,14 +276,13 @@ async fn build_heute_msg(mode: i64) -> String {
     }
 
     msg += "\n < /heute >  < /morgen >\n < /uebermorgen >";
-    
+
     #[cfg(feature = "benchmark")]
     println!("message build took: {:.2?}\n\n", now.elapsed());
 
     // return
     escape_markdown_v2(&msg)
 }
-
 
 fn build_req_date_string(requested_date: DateTime<Local>) -> String {
     let (year, month, day) = (
@@ -282,7 +294,6 @@ fn build_req_date_string(requested_date: DateTime<Local>) -> String {
     let out: String = format!("{:04}-{:02}-{:02}", year, month, day);
     out
 }
-
 
 async fn get_meals(requested_date: DateTime<Local>) -> (Vec<MealGroup>, String) {
     #[cfg(feature = "benchmark")]
@@ -300,22 +311,21 @@ async fn get_meals(requested_date: DateTime<Local>) -> (Vec<MealGroup>, String) 
     match File::open(&url_params) {
         // cached file exists, use that
         Ok(mut file) => {
-            file.read_to_string(&mut html_text).expect("failed to read file contents");
-        },
+            file.read_to_string(&mut html_text)
+                .expect("failed to read file contents");
+        }
         // no cached file, use reqwest
         Err(_) => {
             // retrieving HTML to String
             html_text = reqwest::get(url_base.to_string() + &url_params)
-            .await
-            .expect("URL request failed")
-            .text()
-            .await
-            .unwrap();
+                .await
+                .expect("URL request failed")
+                .text()
+                .await
+                .unwrap();
         }
     }
 
-    
-    
     #[cfg(feature = "benchmark")]
     println!("req return took: {:.2?}", now.elapsed());
 
