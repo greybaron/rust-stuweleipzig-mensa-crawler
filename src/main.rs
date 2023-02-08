@@ -1,13 +1,13 @@
-use std::{
-    env,
-    fs::File,
-    io::{Read, Write},
-    process::exit,
-};
+use std::{env, process::exit};
 
 use chrono::{DateTime, Datelike, Duration, Local, Weekday};
 use scraper::{Html, Selector};
 use selectors::{attr::CaseSensitivity, Element};
+use serde::{Deserialize, Serialize};
+use tokio::task;
+
+use tokio::fs::File;
+use tokio::io::{AsyncReadExt, AsyncWriteExt}; // for write_all()
 
 #[cfg(feature = "benchmark")]
 use std::time::Instant;
@@ -38,11 +38,19 @@ mod markdown {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+struct DayMeals {
+    date: String,
+    meal_groups: Vec<MealGroup>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 struct MealGroup {
     meal_type: String,
     sub_meals: Vec<SingleMeal>,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
 struct SingleMeal {
     name: String,
     additional_ingredients: Vec<String>,
@@ -88,7 +96,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn prefetch() {
     #[cfg(feature = "benchmark")]
     let now = Instant::now();
-    
+
+    std::fs::create_dir_all("cached_data/").expect("failed to create data cache dir");
 
     let mut days: Vec<DateTime<Local>> = Vec::new();
     // ugly hardcoded crap. Unfortunately I think this is the most readable.
@@ -121,60 +130,79 @@ async fn prefetch() {
 
     let loc = 140;
 
+    let mut handles = Vec::new();
+
     for day in days {
-        #[cfg(feature = "benchmark")]
-        println!("starting req for {}", day.weekday());
-        #[cfg(feature = "benchmark")]
-        let now = Instant::now();
-
-        let req_date_formatted = build_req_date_string(day);
-
-        let url_base: String =
-            "https://www.studentenwerk-leipzig.de/mensen-cafeterien/speiseplan?".to_owned();
-        let url_args = format!("location={}&date={}", loc, req_date_formatted);
-
-        // getting data from server
-        let html_text = reqwest::get(url_base + &url_args)
-            .await
-            .expect("URL request failed")
-            .text()
-            .await
-            .unwrap();
-
-        #[cfg(feature = "benchmark")]
-        println!("got {} data after {:.2?}", day.weekday(), now.elapsed());
-        #[cfg(feature = "benchmark")]
-        let now = Instant::now();
-
-        match File::open(&url_args) {
-            // file exists, check if contents match
-            Ok(mut file) => {
-                let mut contents = String::new();
-                file.read_to_string(&mut contents)
-                    .expect("failed to read file contents");
-
-                if contents != html_text {
-                    save_to_file(&url_args, &html_text);
-
-                    #[cfg(feature = "benchmark")]
-                    println!("{}: replaced", day.weekday());
-
-                }
-            }
-            // file doesnt exist, create it
-            Err(_) => {
-                save_to_file(&url_args, &html_text);
-            }
-        }
-        #[cfg(feature = "benchmark")]
-        println!("comparison took: {:.2?}", now.elapsed());
+        handles.push(task::spawn(process_day(day, loc)))
+    }
+    for handle in handles {
+        handle.await.expect("Panic in task");
     }
 }
 
-fn save_to_file(url_args: &String, html_text: &String) {
-    let mut file = File::create(&url_args).unwrap();
-    file.write_all(html_text.as_bytes())
-        .expect("unable to write");
+async fn process_day(day: DateTime<Local>, loc: i32) {
+    #[cfg(feature = "benchmark")]
+    println!("starting req for {}", day.weekday());
+    #[cfg(feature = "benchmark")]
+    let now = Instant::now();
+
+    let req_date_formatted = build_req_date_string(day);
+
+    let url_base: String =
+        "https://www.studentenwerk-leipzig.de/mensen-cafeterien/speiseplan?".to_owned();
+    let url_args = format!("location={}&date={}", loc, req_date_formatted);
+
+    // getting data from server
+    let html_text = reqwest::get(url_base + &url_args)
+        .await
+        .expect("URL request failed")
+        .text()
+        .await
+        .unwrap();
+
+    #[cfg(feature = "benchmark")]
+    println!("got {} data after {:.2?}", day.weekday(), now.elapsed());
+
+    match File::open("cached_data/".to_owned() + &url_args).await {
+        // file exists, check if contents match
+        Ok(mut file) => {
+            let mut contents = String::new();
+            file.read_to_string(&mut contents).await.unwrap();
+
+            if contents != html_text {
+                save_to_file(day, &url_args, &html_text).await;
+
+                #[cfg(feature = "benchmark")]
+                println!("{}: replaced", day.weekday());
+            }
+        }
+        // file doesnt exist, create it
+        Err(_) => {
+            save_to_file(day, &url_args, &html_text).await;
+        }
+    }
+}
+
+async fn save_to_file(day: DateTime<Local>, url_args: &String, html_text: &String) {
+    // saving html content (string comparison is faster than hashing)
+    let mut html_file = File::create(format!("cached_data/{}", &url_args))
+        .await
+        .expect("failed to create a cache file");
+    html_file
+        .write_all(html_text.as_bytes())
+        .await
+        .expect("failed to write received data to cache");
+
+    // getting meals for date to be cached
+    let day_meals = get_meals(day).await;
+
+    let mut json_file = File::create(format!("cached_data/{}.json", &url_args))
+        .await
+        .expect("failed to create a json cache file"); //"cached_data/".to_owned() + &url_args).await.expect("failed to create a cache file");
+    json_file
+        .write_all(serde_json::to_string(&day_meals).unwrap().as_bytes())
+        .await
+        .expect("failed to write to a json file")
 }
 
 fn escape_markdown_v2(input: &str) -> String {
@@ -222,7 +250,7 @@ async fn build_heute_msg(mode: i64) -> String {
     println!("req setup took: {:.2?}", now.elapsed());
 
     // retrieve meals
-    let (v_meal_groups, ret_date) = get_meals(requested_date).await;
+    let day_meals = get_meals(requested_date).await;
 
     // start message formatting
     #[cfg(feature = "benchmark")]
@@ -238,10 +266,14 @@ async fn build_heute_msg(mode: i64) -> String {
     };
 
     // insert date+future day info into msg
-    msg += &format!("{} {}\n", markdown::italic(&ret_date), future_day_info);
+    msg += &format!(
+        "{} {}\n",
+        markdown::italic(&day_meals.date),
+        future_day_info
+    );
 
     // loop over meal groups
-    for meal_group in v_meal_groups {
+    for meal_group in day_meals.meal_groups {
         let mut price_is_shared = true;
         let price_first_submeal = &meal_group.sub_meals.first().unwrap().price;
 
@@ -295,7 +327,7 @@ fn build_req_date_string(requested_date: DateTime<Local>) -> String {
     out
 }
 
-async fn get_meals(requested_date: DateTime<Local>) -> (Vec<MealGroup>, String) {
+async fn get_meals(requested_date: DateTime<Local>) -> DayMeals {
     #[cfg(feature = "benchmark")]
     let now = Instant::now();
     let mut v_meal_groups: Vec<MealGroup> = Vec::new();
@@ -306,134 +338,148 @@ async fn get_meals(requested_date: DateTime<Local>) -> (Vec<MealGroup>, String) 
     let url_base = "https://www.studentenwerk-leipzig.de/mensen-cafeterien/speiseplan?";
     let url_params = format!("location={}&date={}", loc, req_date_formatted);
 
-    let mut html_text: String = String::new();
+    // let mut html_text: String = String::new();
 
-    match File::open(&url_params) {
+    match File::open(format!("cached_data/{}.json", &url_params)).await {
+        //"cached_data/".to_owned() + &url_params).await {
         // cached file exists, use that
         Ok(mut file) => {
-            file.read_to_string(&mut html_text)
-                .expect("failed to read file contents");
+            let mut json_text = String::new();
+            file.read_to_string(&mut json_text).await.unwrap();
+
+            let day_meals: DayMeals = serde_json::from_str(&json_text).unwrap();
+
+            #[cfg(feature = "benchmark")]
+            println!("json deser took: {:.2?}", now.elapsed());
+
+            return day_meals;
         }
         // no cached file, use reqwest
         Err(_) => {
             // retrieving HTML to String
-            html_text = reqwest::get(url_base.to_string() + &url_params)
+            let html_text = reqwest::get(url_base.to_string() + &url_params)
                 .await
                 .expect("URL request failed")
                 .text()
                 .await
                 .unwrap();
-        }
-    }
 
-    #[cfg(feature = "benchmark")]
-    println!("req return took: {:.2?}", now.elapsed());
+            // #[cfg(feature = "benchmark")]
+            // println!("req return took: {:.2?}", now.elapsed());
 
-    #[cfg(feature = "benchmark")]
-    let now = Instant::now();
-    let document = Html::parse_fragment(&html_text);
+            #[cfg(feature = "benchmark")]
+            let now = Instant::now();
+            let document = Html::parse_fragment(&html_text);
 
-    // retrieving reported date and comparing to requested date
-    let date_sel = Selector::parse(r#"select#edit-date>option[selected='selected']"#).unwrap();
-    let received_date = document.select(&date_sel).next().unwrap().inner_html();
+            // retrieving reported date and comparing to requested date
+            let date_sel =
+                Selector::parse(r#"select#edit-date>option[selected='selected']"#).unwrap();
+            let received_date = document.select(&date_sel).next().unwrap().inner_html();
 
-    // formatting received date to format in URL parameter,
-    // to check if correct date was returned
-    let received_date_formatted = format!(
-        "{:04}-{:02}-{:02}",
-        // year
-        received_date[received_date.len() - 4..]
-            .parse::<i32>()
-            .unwrap(),
-        // month
-        received_date[received_date.len() - 7..received_date.len() - 5]
-            .parse::<i32>()
-            .unwrap(),
-        // day
-        received_date[received_date.len() - 10..received_date.len() - 8]
-            .parse::<i32>()
-            .unwrap(),
-    );
+            // formatting received date to format in URL parameter,
+            // to check if correct date was returned
+            let received_date_formatted = format!(
+                "{:04}-{:02}-{:02}",
+                // year
+                received_date[received_date.len() - 4..]
+                    .parse::<i32>()
+                    .unwrap(),
+                // month
+                received_date[received_date.len() - 7..received_date.len() - 5]
+                    .parse::<i32>()
+                    .unwrap(),
+                // day
+                received_date[received_date.len() - 10..received_date.len() - 8]
+                    .parse::<i32>()
+                    .unwrap(),
+            );
 
-    if received_date_formatted != req_date_formatted {
-        println!("Für den Tag existiert noch kein Plan.");
-        exit(0);
-    }
+            if received_date_formatted != req_date_formatted {
+                println!("Für den Tag existiert noch kein Plan.");
+                exit(0);
+            }
 
-    let container_sel = Selector::parse(r#"section.meals"#).unwrap();
-    let all_child_select = Selector::parse(r#":scope > *"#).unwrap();
+            let container_sel = Selector::parse(r#"section.meals"#).unwrap();
+            let all_child_select = Selector::parse(r#":scope > *"#).unwrap();
 
-    let container = document.select(&container_sel).next().unwrap();
+            let container = document.select(&container_sel).next().unwrap();
 
-    for child in container.select(&all_child_select) {
-        if child
-            .value()
-            .has_class("title-prim", CaseSensitivity::CaseSensitive)
-        {
-            // title-prim == new group -> init new group struct
-            let mut meals_in_group: Vec<SingleMeal> = Vec::new();
-
-            let mut next_sibling = child.next_sibling_element().unwrap();
-
-            // skip headlines (or other junk elements)
-            // might loop infinitely (or probably crash) if last element is not of class .accordion.ublock :)
-            while !(next_sibling
-                .value()
-                .has_class("accordion", CaseSensitivity::CaseSensitive)
-                && next_sibling
+            for child in container.select(&all_child_select) {
+                if child
                     .value()
-                    .has_class("u-block", CaseSensitivity::CaseSensitive))
-            {
-                next_sibling = next_sibling.next_sibling_element().unwrap();
-            }
-
-            // "next_sibling" is now of class ".accordion.u-block", aka. a group of 1 or more dishes
-            // -> looping over meals in group
-            for dish_element in next_sibling.select(&all_child_select) {
-                let mut additional_ingredients: Vec<String> = Vec::new();
-
-                // looping over meal ingredients
-                for add_ingred_element in
-                    dish_element.select(&Selector::parse(r#"details>ul>li"#).unwrap())
+                    .has_class("title-prim", CaseSensitivity::CaseSensitive)
                 {
-                    additional_ingredients.push(add_ingred_element.inner_html());
+                    // title-prim == new group -> init new group struct
+                    let mut meals_in_group: Vec<SingleMeal> = Vec::new();
+
+                    let mut next_sibling = child.next_sibling_element().unwrap();
+
+                    // skip headlines (or other junk elements)
+                    // might loop infinitely (or probably crash) if last element is not of class .accordion.ublock :)
+                    while !(next_sibling
+                        .value()
+                        .has_class("accordion", CaseSensitivity::CaseSensitive)
+                        && next_sibling
+                            .value()
+                            .has_class("u-block", CaseSensitivity::CaseSensitive))
+                    {
+                        next_sibling = next_sibling.next_sibling_element().unwrap();
+                    }
+
+                    // "next_sibling" is now of class ".accordion.u-block", aka. a group of 1 or more dishes
+                    // -> looping over meals in group
+                    for dish_element in next_sibling.select(&all_child_select) {
+                        let mut additional_ingredients: Vec<String> = Vec::new();
+
+                        // looping over meal ingredients
+                        for add_ingred_element in
+                            dish_element.select(&Selector::parse(r#"details>ul>li"#).unwrap())
+                        {
+                            additional_ingredients.push(add_ingred_element.inner_html());
+                        }
+
+                        // collecting into SingleMeal struct
+                        let meal = SingleMeal {
+                            name: dish_element
+                                .select(&Selector::parse(r#"header>div>div>h4"#).unwrap())
+                                .next()
+                                .unwrap()
+                                .inner_html(),
+                            additional_ingredients: additional_ingredients, //
+                            price: dish_element
+                                .select(&Selector::parse(r#"header>div>div>p"#).unwrap())
+                                .next()
+                                .unwrap()
+                                .inner_html()
+                                .split("\n")
+                                .last()
+                                .unwrap()
+                                .trim()
+                                .to_string(),
+                        };
+
+                        // pushing SingleMeal to meals struct
+                        meals_in_group.push(meal);
+                    }
+
+                    // collecting into MealGroup struct
+                    let meal_group = MealGroup {
+                        meal_type: child.inner_html(),
+                        sub_meals: meals_in_group,
+                    };
+
+                    // pushing MealGroup to MealGroups struct
+                    v_meal_groups.push(meal_group);
                 }
-
-                // collecting into SingleMeal struct
-                let meal = SingleMeal {
-                    name: dish_element
-                        .select(&Selector::parse(r#"header>div>div>h4"#).unwrap())
-                        .next()
-                        .unwrap()
-                        .inner_html(),
-                    additional_ingredients: additional_ingredients, //
-                    price: dish_element
-                        .select(&Selector::parse(r#"header>div>div>p"#).unwrap())
-                        .next()
-                        .unwrap()
-                        .inner_html()
-                        .split("\n")
-                        .last()
-                        .unwrap()
-                        .trim()
-                        .to_string(),
-                };
-
-                // pushing SingleMeal to meals struct
-                meals_in_group.push(meal);
             }
+            #[cfg(feature = "benchmark")]
+            println!("parsing took: {:.2?}", now.elapsed());
 
-            // collecting into MealGroup struct
-            let meal_group = MealGroup {
-                meal_type: child.inner_html(),
-                sub_meals: meals_in_group,
+            let day_meals = DayMeals {
+                date: received_date,
+                meal_groups: v_meal_groups,
             };
-
-            // pushing MealGroup to MealGroups struct
-            v_meal_groups.push(meal_group);
+            return day_meals;
         }
     }
-    #[cfg(feature = "benchmark")]
-    println!("parsing took: {:.2?}", now.elapsed());
-    (v_meal_groups, received_date)
 }
