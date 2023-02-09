@@ -1,56 +1,31 @@
-use std::{env, process::exit};
-
 use chrono::{DateTime, Datelike, Duration, Local, Weekday};
-use scraper::{Html, Selector};
-use selectors::{attr::CaseSensitivity, Element};
 use serde::{Deserialize, Serialize};
-use tokio::task;
+#[cfg(feature = "benchmark")]
+use std::time::Instant;
+use std::{env, process::exit};
 
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt}; // for write_all()
+use tokio::task;
 
-#[cfg(feature = "benchmark")]
-use std::time::Instant;
+use scraper::{Html, Selector};
+use selectors::{attr::CaseSensitivity, Element};
 
-// ripped out of teloxide (to avoid slow compilation)
-mod markdown {
-    pub fn bold(s: &str) -> String {
-        format!("*{s}*")
-    }
-    pub fn italic(s: &str) -> String {
-        if s.starts_with("__") && s.ends_with("__") {
-            format!(r"_{}\r__", &s[..s.len() - 1])
-        } else {
-            format!("_{s}_")
-        }
-    }
-    pub fn underline(s: &str) -> String {
-        // In case of ambiguity between italic and underline entities
-        // ‘__’ is always greedily treated from left to right as beginning or end of
-        // underline entity, so instead of ___italic underline___ we should use
-        // ___italic underline_\r__, where \r is a character with code 13, which
-        // will be ignored.
-        if s.starts_with('_') && s.ends_with('_') {
-            format!(r"__{s}\r__")
-        } else {
-            format!("__{s}__")
-        }
-    }
-}
+use teloxide::utils::markdown;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize)]
 struct DayMeals {
     date: String,
     meal_groups: Vec<MealGroup>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize)]
 struct MealGroup {
     meal_type: String,
     sub_meals: Vec<SingleMeal>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize)]
 struct SingleMeal {
     name: String,
     additional_ingredients: Vec<String>,
@@ -89,15 +64,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         exit(2);
     }
 
-    println!("{}", build_heute_msg(mode).await);
+    println!("{}", build_chat_message(mode).await);
     Ok(())
 }
 
 async fn prefetch() {
+    // will be run periodically: requests all possible dates (heute/morgen/ueb) and creates/updates caches
     #[cfg(feature = "benchmark")]
     let now = Instant::now();
-
-    std::fs::create_dir_all("cached_data/").expect("failed to create data cache dir");
 
     let mut days: Vec<DateTime<Local>> = Vec::new();
     // ugly hardcoded crap. Unfortunately I think this is the most readable.
@@ -140,106 +114,59 @@ async fn prefetch() {
 
     let loc = 140;
 
+    // add task handles to vec so that they can be awaited after spawing
     let mut handles = Vec::new();
 
+    // spawning task for every day
     for day in days {
-        handles.push(task::spawn(cache_day_data(day, loc)))
+        handles.push(task::spawn(prefetch_for_day(day, loc)))
     }
+
+    // awaiting results of every task
     for handle in handles {
         handle.await.expect("Panic in task");
     }
 }
 
-
-async fn reqwest_data(url_args: &String) -> String {
-    let url_base: String = "https://www.studentenwerk-leipzig.de/mensen-cafeterien/speiseplan?".to_owned();
-    
-    let html_text = reqwest::get(url_base + &url_args)
-        .await
-        .expect("URL request failed")
-        .text()
-        .await
-        .unwrap();
-
-    html_text
-}
-
-
-async fn cache_day_data(day: DateTime<Local>, loc: i32) {
+async fn prefetch_for_day(day: DateTime<Local>, loc: i32) {
     #[cfg(feature = "benchmark")]
     println!("starting req for {}", day.weekday());
     #[cfg(feature = "benchmark")]
     let now = Instant::now();
 
     let req_date_formatted = build_req_date_string(day);
-    let url_args = format!("location={}&date={}", loc, req_date_formatted);
+    let url_params = format!("location={}&date={}", loc, req_date_formatted);
 
     // getting data from server
-    let html_text = reqwest_data(&url_args).await;
+    let html_text = reqwest_get_html_text(&url_params).await;
 
     #[cfg(feature = "benchmark")]
     println!("got {} data after {:.2?}", day.weekday(), now.elapsed());
 
-    match File::open("cached_data/".to_owned() + &url_args).await {
+    match File::open("cached_data/".to_owned() + &url_params).await {
         // file exists, check if contents match
         Ok(mut file) => {
             let mut contents = String::new();
             file.read_to_string(&mut contents).await.unwrap();
 
+            // cache is outdated -> overwrite
             if contents != html_text {
-                save_cache_to_file(day, &url_args, &html_text).await;
+                let day_meals = extract_data_from_html(&html_text, req_date_formatted).await;
+                save_data_to_cache(&html_text, &day_meals, &url_params).await;
 
                 #[cfg(feature = "benchmark")]
                 println!("{}: replaced", day.weekday());
             }
         }
-        // file doesnt exist, create it
+        // cache file doesnt exist, create it
         Err(_) => {
-            save_cache_to_file(day, &url_args, &html_text).await;
+            let day_meals = extract_data_from_html(&html_text, req_date_formatted).await;
+            save_data_to_cache(&html_text, &day_meals, &url_params).await;
         }
     }
 }
 
-async fn save_cache_to_file(day: DateTime<Local>, url_args: &String, html_text: &String) {
-    // saving html content (string comparison is faster than hashing)
-    let mut html_file = File::create(format!("cached_data/{}", &url_args))
-        .await
-        .expect("failed to create a cache file");
-    html_file
-        .write_all(html_text.as_bytes())
-        .await
-        .expect("failed to write received data to cache");
-
-    // getting meals for date to be cached
-    // ass backwards tf?
-    let day_meals = get_meals(day).await;
-
-    let mut json_file = File::create(format!("cached_data/{}.json", &url_args))
-        .await
-        .expect("failed to create a json cache file"); //"cached_data/".to_owned() + &url_args).await.expect("failed to create a cache file");
-    json_file
-        .write_all(serde_json::to_string(&day_meals).unwrap().as_bytes())
-        .await
-        .expect("failed to write to a json file")
-}
-
-fn escape_markdown_v2(input: &str) -> String {
-    let res = input
-        .replace(".", r"\.")
-        .replace("!", r"\!")
-        .replace("+", r"\+")
-        .replace("-", r"\-")
-        .replace("<", r"\<")
-        .replace(">", r"\>")
-        .replace("(", r"\(")
-        .replace(")", r"\)")
-        .replace("=", r"\=")
-        // workaround as '&' in html is improperly decoded
-        .replace("&amp;", "&");
-    res
-}
-
-async fn build_heute_msg(mode: i64) -> String {
+async fn build_chat_message(mode: i64) -> String {
     #[cfg(feature = "benchmark")]
     let now = Instant::now();
 
@@ -334,6 +261,51 @@ async fn build_heute_msg(mode: i64) -> String {
     escape_markdown_v2(&msg)
 }
 
+async fn get_meals(requested_date: DateTime<Local>) -> DayMeals {
+    // returns meals struct either from cache,
+    // or starts html request, parses data; returns data and also triggers saving to cache
+    #[cfg(feature = "benchmark")]
+    let now = Instant::now();
+
+    // url parameters
+    let loc = 140;
+    let req_date_formatted = build_req_date_string(requested_date);
+    let url_params = format!("location={}&date={}", loc, req_date_formatted);
+
+    // try to read from cache
+    match File::open(format!("cached_data/{}.json", &url_params)).await {
+        // cached file exists, use that
+        Ok(mut file) => {
+            let mut json_text = String::new();
+            file.read_to_string(&mut json_text).await.unwrap();
+
+            let day_meals: DayMeals = serde_json::from_str(&json_text).unwrap();
+
+            #[cfg(feature = "benchmark")]
+            println!("json deser took: {:.2?}", now.elapsed());
+
+            return day_meals;
+        }
+        // no cached file, use reqwest
+        Err(_) => {
+            // retrieve HTML
+            let html_text = reqwest_get_html_text(&url_params).await;
+
+            #[cfg(feature = "benchmark")]
+            println!("req return took: {:.2?}", now.elapsed());
+
+            // extract data to struct
+            let day_meals = extract_data_from_html(&html_text, req_date_formatted).await;
+
+            // save struct to cache
+            save_data_to_cache(&html_text, &day_meals, &url_params).await;
+
+            // return struct
+            return day_meals;
+        }
+    }
+}
+
 fn build_req_date_string(requested_date: DateTime<Local>) -> String {
     let (year, month, day) = (
         requested_date.year(),
@@ -345,7 +317,23 @@ fn build_req_date_string(requested_date: DateTime<Local>) -> String {
     out
 }
 
-async fn parse_data_from_html(html_text: String, req_date_formatted: String) -> DayMeals {
+async fn reqwest_get_html_text(url_params: &String) -> String {
+    // requests html from server for chosen url params and returns html_text string
+
+    let url_base: String =
+        "https://www.studentenwerk-leipzig.de/mensen-cafeterien/speiseplan?".to_owned();
+
+    let html_text = reqwest::get(url_base + &url_params)
+        .await
+        .expect("URL request failed")
+        .text()
+        .await
+        .unwrap();
+
+    html_text
+}
+
+async fn extract_data_from_html(html_text: &String, req_date_formatted: String) -> DayMeals {
     #[cfg(feature = "benchmark")]
     let now = Instant::now();
 
@@ -354,8 +342,7 @@ async fn parse_data_from_html(html_text: String, req_date_formatted: String) -> 
     let document = Html::parse_fragment(&html_text);
 
     // retrieving reported date and comparing to requested date
-    let date_sel =
-        Selector::parse(r#"select#edit-date>option[selected='selected']"#).unwrap();
+    let date_sel = Selector::parse(r#"select#edit-date>option[selected='selected']"#).unwrap();
     let received_date = document.select(&date_sel).next().unwrap().inner_html();
 
     // formatting received date to format in URL parameter,
@@ -464,50 +451,43 @@ async fn parse_data_from_html(html_text: String, req_date_formatted: String) -> 
     return day_meals;
 }
 
-async fn get_meals(requested_date: DateTime<Local>) -> DayMeals {
-    #[cfg(feature = "benchmark")]
-    let now = Instant::now();
+async fn save_data_to_cache(html_text: &String, day_meals: &DayMeals, url_params: &String) {
+    // writes html_text and day_meals struct to cache files
 
-    // url parameters
-    let loc = 140;
-    let req_date_formatted = build_req_date_string(requested_date);
-    let url_base = "https://www.studentenwerk-leipzig.de/mensen-cafeterien/speiseplan?";
-    let url_params = format!("location={}&date={}", loc, req_date_formatted);
+    // checks cache dir existence, and creates it if not found
+    std::fs::create_dir_all("cached_data/").expect("failed to create data cache dir");
 
-    // let mut html_text: String = String::new();
+    // saving html content (string comparison is faster than hashing)
+    let mut html_file = File::create(format!("cached_data/{}", &url_params))
+        .await
+        .expect("failed to create a cache file");
+    html_file
+        .write_all(html_text.as_bytes())
+        .await
+        .expect("failed to write received data to cache");
 
-    match File::open(format!("cached_data/{}.json", &url_params)).await {
-        // cached file exists, use that
-        Ok(mut file) => {
-            let mut json_text = String::new();
-            file.read_to_string(&mut json_text).await.unwrap();
+    let mut json_file = File::create(format!("cached_data/{}.json", &url_params))
+        .await
+        .expect("failed to create a json cache file"); //"cached_data/".to_owned() + &url_params).await.expect("failed to create a cache file");
+    json_file
+        .write_all(serde_json::to_string(&day_meals).unwrap().as_bytes())
+        .await
+        .expect("failed to write to a json file")
+}
 
-            let day_meals: DayMeals = serde_json::from_str(&json_text).unwrap();
-
-            #[cfg(feature = "benchmark")]
-            println!("json deser took: {:.2?}", now.elapsed());
-
-            return day_meals;
-        }
-        // no cached file, use reqwest
-        Err(_) => {
-            // retrieving HTML to String
-            // todo save_cache_to_file(day, &url_args, &html_text).await;
-            let html_text = reqwest::get(url_base.to_string() + &url_params)
-                .await
-                .expect("URL request failed")
-                .text()
-                .await
-                .unwrap();
-
-            #[cfg(feature = "benchmark")]
-            println!("req return took: {:.2?}", now.elapsed());
-
-            // todo: error handling?
-            let day_meals = parse_data_from_html(html_text, req_date_formatted).await;
-            // save_cache_to_file(day, url_args, &html_text);
-            day_meals
-            
-        }
-    }
+fn escape_markdown_v2(input: &str) -> String {
+    // all 'special' chars have to be escaped when using telegram markdown_v2
+    let res = input
+        .replace(".", r"\.")
+        .replace("!", r"\!")
+        .replace("+", r"\+")
+        .replace("-", r"\-")
+        .replace("<", r"\<")
+        .replace(">", r"\>")
+        .replace("(", r"\(")
+        .replace(")", r"\)")
+        .replace("=", r"\=")
+        // workaround as '&' in html is improperly decoded
+        .replace("&amp;", "&");
+    res
 }
