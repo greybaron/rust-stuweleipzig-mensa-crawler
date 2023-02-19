@@ -240,7 +240,7 @@ async fn build_chat_message(mode: i64) -> String {
             // loop over ingredients of meal
             for ingredient in &sub_meal.additional_ingredients {
                 // appending ingredient to msg
-                msg += &format!("     + {}\n", markdown::italic(&ingredient))
+                msg += &format!("     + {}\n", markdown::italic(ingredient))
             }
             // appending price
             if !price_is_shared {
@@ -284,7 +284,7 @@ async fn get_meals(requested_date: DateTime<Local>) -> DayMeals {
             #[cfg(feature = "benchmark")]
             println!("json deser took: {:.2?}", now.elapsed());
 
-            return day_meals;
+            day_meals
         }
         // no cached file, use reqwest
         Err(_) => {
@@ -301,7 +301,7 @@ async fn get_meals(requested_date: DateTime<Local>) -> DayMeals {
             save_data_to_cache(&html_text, &day_meals, &url_params).await;
 
             // return struct
-            return day_meals;
+            day_meals
         }
     }
 }
@@ -323,7 +323,7 @@ async fn reqwest_get_html_text(url_params: &String) -> String {
     let url_base: String =
         "https://www.studentenwerk-leipzig.de/mensen-cafeterien/speiseplan?".to_owned();
 
-    let html_text = reqwest::get(url_base + &url_params)
+    let html_text = reqwest::get(url_base + url_params)
         .await
         .expect("URL request failed")
         .text()
@@ -333,13 +333,13 @@ async fn reqwest_get_html_text(url_params: &String) -> String {
     html_text
 }
 
-async fn extract_data_from_html(html_text: &String, req_date_formatted: String) -> DayMeals {
+async fn extract_data_from_html(html_text: &str, req_date_formatted: String) -> DayMeals {
     #[cfg(feature = "benchmark")]
     let now = Instant::now();
 
     let mut v_meal_groups: Vec<MealGroup> = Vec::new();
 
-    let document = Html::parse_fragment(&html_text);
+    let document = Html::parse_fragment(html_text);
 
     // retrieving reported date and comparing to requested date
     let date_sel = Selector::parse(r#"select#edit-date>option[selected='selected']"#).unwrap();
@@ -414,13 +414,13 @@ async fn extract_data_from_html(html_text: &String, req_date_formatted: String) 
                         .next()
                         .unwrap()
                         .inner_html(),
-                    additional_ingredients: additional_ingredients, //
+                    additional_ingredients, //
                     price: dish_element
                         .select(&Selector::parse(r#"header>div>div>p"#).unwrap())
                         .next()
                         .unwrap()
                         .inner_html()
-                        .split("\n")
+                        .split('\n')
                         .last()
                         .unwrap()
                         .trim()
@@ -444,11 +444,11 @@ async fn extract_data_from_html(html_text: &String, req_date_formatted: String) 
     #[cfg(feature = "benchmark")]
     println!("parsing took: {:.2?}", now.elapsed());
 
-    let day_meals = DayMeals {
+    
+    DayMeals {
         date: received_date,
         meal_groups: v_meal_groups,
-    };
-    return day_meals;
+    }
 }
 
 async fn save_data_to_cache(html_text: &String, day_meals: &DayMeals, url_params: &String) {
@@ -477,17 +477,17 @@ async fn save_data_to_cache(html_text: &String, day_meals: &DayMeals, url_params
 
 fn escape_markdown_v2(input: &str) -> String {
     // all 'special' chars have to be escaped when using telegram markdown_v2
-    let res = input
-        .replace(".", r"\.")
-        .replace("!", r"\!")
-        .replace("+", r"\+")
-        .replace("-", r"\-")
-        .replace("<", r"\<")
-        .replace(">", r"\>")
-        .replace("(", r"\(")
-        .replace(")", r"\)")
-        .replace("=", r"\=")
+    
+    input
+        .replace('.', r"\.")
+        .replace('!', r"\!")
+        .replace('+', r"\+")
+        .replace('-', r"\-")
+        .replace('<', r"\<")
+        .replace('>', r"\>")
+        .replace('(', r"\(")
+        .replace(')', r"\)")
+        .replace('=', r"\=")
         // workaround as '&' in html is improperly decoded
-        .replace("&amp;", "&");
-    res
+        .replace("&amp;", "&")
 }
